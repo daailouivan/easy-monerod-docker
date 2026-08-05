@@ -1,0 +1,13 @@
+# local build/run artifacts
+*.log
+.env
+.env.*
+!.env.example
+
+# macOS
+.DS_Store
+
+# editor
+.idea/
+.vscode/
+*.swp
