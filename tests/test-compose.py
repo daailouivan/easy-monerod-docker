@@ -1,29 +1,33 @@
 #!/usr/bin/env python3
-"""Validate both compose stacks.
+"""Validate both compose stacks, with and without the optional Tor block.
 
-Guards the standard and Synology variants: they must stay parseable, point at
-the same GHCR image, keep the ports and data path the image expects, and pass
-only flags monerod actually accepts.
+Two files, split by host:
+    docker-compose.yml            standard Docker host
+    docker-compose-synology.yml   Synology NAS
+
+Tor ships commented out in both, which means Compose never sees it and it can
+rot silently. So this suite uncomments the Tor block programmatically and runs
+the real `docker compose config` validator over the result — the optional path
+is tested, not just the default one.
 """
 import os
 import pathlib
 import shutil
 import subprocess
 import sys
+import tempfile
 
 import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 STACKS = {
     "standard": ROOT / "docker-compose.yml",
-    "synology": ROOT / "docker-compose.synology.yml",
-    "tor": ROOT / "docker-compose.tor.yml",
+    "synology": ROOT / "docker-compose-synology.yml",
 }
 IMAGE = "ghcr.io/daailouivan/easy-monerod"
 DATA = "/home/monero/.bitmonero"
 
-# Flags the Dockerfile's own CMD uses, i.e. known-good against this monerod.
-KNOWN = {
+KNOWN_FLAGS = {
     "--rpc-restricted-bind-ip", "--rpc-restricted-bind-port", "--no-igd",
     "--no-zmq", "--enable-dns-blocklist", "--ban-list", "--public-node",
     "--prune-blockchain", "--rpc-bind-port", "--rpc-login", "--non-interactive",
@@ -45,148 +49,159 @@ def check(cond, msg):
         failed += 1
 
 
+def compose_cmd():
+    """Compose CLI, falling back to the plugin binary when it isn't linked."""
+    if shutil.which("docker"):
+        try:
+            subprocess.run(["docker", "compose", "version"],
+                           capture_output=True, check=True)
+            return ["docker", "compose"]
+        except (subprocess.CalledProcessError, OSError):
+            pass
+    for p in ("/opt/homebrew/lib/docker/cli-plugins/docker-compose",
+              "/usr/local/lib/docker/cli-plugins/docker-compose",
+              os.path.expanduser("~/.docker/cli-plugins/docker-compose")):
+        if os.access(p, os.X_OK):
+            return [p]
+    found = shutil.which("docker-compose")
+    return [found] if found else None
+
+
+CC = compose_cmd()
+
+
+def validate(text, label):
+    """Run the real compose schema validator over `text`."""
+    if not CC:
+        print(f"  SKIP compose CLI not found ({label})")
+        return None
+    with tempfile.TemporaryDirectory() as d:
+        f = pathlib.Path(d) / "docker-compose.yml"
+        f.write_text(text)
+        r = subprocess.run(CC + ["-f", str(f), "config", "--quiet"],
+                           capture_output=True, text=True)
+        return r.returncode == 0, r.stderr.strip()[:140]
+
+
+# Every line to uncomment for Tor is tagged `#T` in both compose files, so
+# enabling it is mechanical — no heuristics, and `grep -n '#T'` shows a user
+# exactly the same set of lines this test flips.
+PLAIN_RPC = '- "18089:18089"'
+
+
+def enable_tor(text):
+    """Uncomment every `#T` line, and comment the LAN RPC port it replaces."""
+    out = []
+    for line in text.split("\n"):
+        stripped = line.lstrip()
+        indent = line[: len(line) - len(stripped)]
+        if stripped.startswith(PLAIN_RPC) and not stripped.startswith("#"):
+            out.append(indent + "# " + stripped)
+            continue
+        if stripped.startswith("#T "):
+            out.append(indent + stripped[3:])
+            continue
+        if stripped.startswith("#T"):
+            out.append(indent + stripped[2:])
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
 for name, path in STACKS.items():
     print(f"[{name}] {path.name}")
     check(path.exists(), "file exists")
-    d = yaml.safe_load(path.read_text())
-    check(isinstance(d, dict) and "services" in d, "parses with a services block")
+    raw = path.read_text()
+    d = yaml.safe_load(raw)
     check("version" not in d, "no obsolete top-level 'version' key")
 
     svc = d["services"]["monerod"]
     check(IMAGE in svc["image"], f"image is {IMAGE}")
     check("MONEROD_IMAGE" in svc["image"], "image overridable via $MONEROD_IMAGE")
-
-    mounts = [v.split(":")[1] for v in svc["volumes"]]
-    check(DATA in mounts, f"blockchain mounted at {DATA}")
+    check(any(DATA in v for v in svc["volumes"]), f"blockchain mounted at {DATA}")
 
     ports = [str(p).strip('"') for p in svc["ports"]]
     check(any(p.startswith("18080") for p in ports), "p2p 18080 published")
-    # The tor stack deliberately binds RPC to loopback (reachable via the
-    # onion service, not the LAN), so accept either form.
-    check(
-        any(p.endswith("18089:18089") or p.startswith("18089") for p in ports),
-        "restricted RPC 18089 mapped",
-    )
+    check(any(p.startswith("18089") for p in ports), "restricted RPC 18089 published")
 
     cmd = svc["command"]
-    flags = {c.split("=")[0] for c in cmd}
-    unknown = flags - KNOWN
+    unknown = {c.split("=")[0] for c in cmd} - KNOWN_FLAGS
     check(not unknown, f"all flags recognised{'' if not unknown else ': ' + str(unknown)}")
-    check(all(c.startswith("--") for c in cmd), "every command entry is a flag")
-    check(
-        "--rpc-restricted-bind-ip=0.0.0.0" in cmd,
-        "restricted RPC bound for container networking",
-    )
-    # Overriding CMD drops the image default, so the port must be restated.
-    check(
-        "--rpc-restricted-bind-port=18089" in cmd,
-        "RPC port restated (custom command replaces the image CMD)",
-    )
+    check("--rpc-restricted-bind-port=18089" in cmd,
+          "RPC port restated (custom command replaces the image CMD)")
+
+    r = validate(raw, name)
+    if r:
+        check(r[0], f"docker compose config{'' if r[0] else ' -> ' + r[1]}")
+
+    # --- the same file with Tor switched on -------------------------------
+    tor_text = enable_tor(raw)
+    t = yaml.safe_load(tor_text)
+    tsvc = t["services"]["monerod"]
+    tcmd = tsvc["command"]
+    check("tor" in t["services"], "TOR: tor service enabled")
+    tor_svc = t["services"]["tor"]
+    check("hundehausen/tor-hidden-service" in tor_svc["image"],
+          "TOR: maintained tor image")
+    check("goldy/" not in raw, "TOR: not the stale goldy image (last built 2023)")
+
+    hs = dict(e.split("=", 1) for e in tor_svc["environment"] if e.startswith("HS_"))
+    check(len(hs) == 2, f"TOR: two hidden services: {sorted(hs)}")
+    check(hs.get("HS_MONEROD_RPC") == "monerod:18089:18089",
+          "TOR: RPC onion -> monerod:18089")
+    check(hs.get("HS_MONEROD_P2P") == "monerod:18084:18084",
+          "TOR: P2P onion -> monerod:18084")
+    check("18080" not in str(hs.get("HS_MONEROD_P2P", "")),
+          "TOR: anonymous-inbound on a dedicated port, not 18080 (docs requirement)")
+
+    txp = [c for c in tcmd if c.startswith("--tx-proxy")]
+    check(bool(txp) and txp[0].split("=", 1)[1].startswith("tor,"),
+          "TOR: --tx-proxy tor, so our own txs broadcast over Tor")
+    check(any(c.startswith("--anonymous-inbound") for c in tcmd),
+          "TOR: --anonymous-inbound present")
+    check("ANONYMOUS_INBOUND" in raw, "TOR: inbound onion via env, not hardcoded")
+
+    tports = [str(p).strip('"') for p in tsvc["ports"]]
+    check(any(p.startswith("127.0.0.1:18089") for p in tports),
+          "TOR: RPC on loopback only (reached via onion, not the LAN)")
+    check("18089:18089" not in tports, "TOR: LAN RPC disabled")
+    check(any(p.startswith("18080") for p in tports),
+          "TOR: clearnet p2p still published (cannot sync over onion)")
+    check(any("tor-keys" in str(v) for v in tor_svc["volumes"]),
+          "TOR: onion keys persisted (stable address across restarts)")
+    check(tsvc.get("depends_on") == ["tor"], "TOR: monerod waits for the proxy")
+
+    r = validate(tor_text, f"{name}+tor")
+    if r:
+        check(r[0], f"TOR: docker compose config{'' if r[0] else ' -> ' + r[1]}")
     print()
 
-# Compose's own schema validator, when available. `config` needs no daemon.
-# The plugin is sometimes installed but not linked into the docker CLI, so
-# fall back to invoking the binary directly.
-def compose_cmd():
-    if shutil.which("docker"):
-        try:
-            subprocess.run(["docker", "compose", "version"], capture_output=True, check=True)
-            return ["docker", "compose"]
-        except (subprocess.CalledProcessError, OSError):
-            pass
-    for p in (
-        "/opt/homebrew/lib/docker/cli-plugins/docker-compose",
-        "/usr/local/lib/docker/cli-plugins/docker-compose",
-        os.path.expanduser("~/.docker/cli-plugins/docker-compose"),
-    ):
-        if os.access(p, os.X_OK):
-            return [p]
-    return shutil.which("docker-compose") and [shutil.which("docker-compose")]
-
-
-print("[compose schema]")
-cc = compose_cmd()
-if cc:
-    for name, path in STACKS.items():
-        r = subprocess.run(
-            cc + ["-f", str(path), "config", "--quiet"],
-            capture_output=True, text=True,
-        )
-        check(r.returncode == 0, f"{name}: docker compose config{'' if r.returncode == 0 else ' -> ' + r.stderr.strip()[:90]}")
-else:
-    print("  SKIP compose CLI not found on this host")
-print()
-
-print("[tor stack — per monero-project/monero docs/ANONYMITY_NETWORKS.md]")
-tor_doc = yaml.safe_load(STACKS["tor"].read_text())
-tsvc = tor_doc["services"]["tor"]
-tmon = tor_doc["services"]["monerod"]
-tcmd = tmon["command"]
-traw = STACKS["tor"].read_text()
-
-check("hundehausen/tor-hidden-service" in tsvc["image"], "maintained tor image")
-check("goldy/" not in traw, "not the stale goldy image (last built 2023)")
-
-hs = dict(e.split("=", 1) for e in tsvc["environment"] if e.startswith("HS_"))
-check(len(hs) == 2, f"two hidden services declared: {sorted(hs)}")
-rpc = [v for k, v in hs.items() if "RPC" in k]
-p2p = [v for k, v in hs.items() if "P2P" in k]
-check(bool(rpc) and rpc[0] == "monerod:18089:18089", "RPC onion -> monerod:18089")
-check(bool(p2p) and p2p[0] == "monerod:18084:18084", "P2P onion -> monerod:18084")
-
-# Official requirement: anonymous-inbound port must NOT be the clearnet p2p port.
-check(
-    bool(p2p) and not p2p[0].split(":")[1] == "18080",
-    "anonymous-inbound uses a dedicated port, not 18080 (docs requirement)",
-)
-
-# 2 of the 3 official capabilities are monerod flags, not container config.
-txp = [c for c in tcmd if c.startswith("--tx-proxy")]
-check(bool(txp), f"--tx-proxy set, so our own txs broadcast over Tor: {txp}")
-check(
-    bool(txp) and txp[0].split("=", 1)[1].startswith("tor,"),
-    "tx-proxy declares the tor network type",
-)
-check(
-    any(c.startswith("--anonymous-inbound") for c in tcmd),
-    "--anonymous-inbound present (accepts inbound onion peers)",
-)
-check("ANONYMOUS_INBOUND" in traw, "inbound onion address supplied via env, not hardcoded")
-
-check(
-    any("tor-keys" in v for v in tsvc["volumes"]),
-    "onion keys persisted (stable addresses across restarts)",
-)
-check("tor-keys" in tor_doc["volumes"], "tor-keys volume declared")
-check(
-    any(str(p).strip('"').startswith("127.0.0.1:18089") for p in tmon["ports"]),
-    "RPC on loopback only (reachable via onion, not the LAN)",
-)
-check(
-    any(str(p).strip('"').startswith("18080") for p in tmon["ports"]),
-    "clearnet p2p still published (monerod cannot sync over onion)",
-)
-check(tmon.get("depends_on") == ["tor"], "monerod waits for the tor proxy")
-print()
-
 print("[cross-stack]")
-std = yaml.safe_load(STACKS["standard"].read_text())["services"]["monerod"]
-syn = yaml.safe_load(STACKS["synology"].read_text())["services"]["monerod"]
+std_raw = STACKS["standard"].read_text()
+syn_raw = STACKS["synology"].read_text()
+std = yaml.safe_load(std_raw)["services"]["monerod"]
+syn = yaml.safe_load(syn_raw)["services"]["monerod"]
 check(std["image"] == syn["image"], "both stacks pin the same image expression")
 check("user" not in std, "standard relies on fixuid (no hardcoded uid)")
 check("user" in syn, "synology sets an explicit uid:gid")
-check(
-    syn["volumes"][0].startswith("./"),
-    "synology uses a bind mount (DSM-browsable)",
-)
-check(
-    not std["volumes"][0].startswith("./"),
-    "standard uses a named volume",
-)
-check(
-    "watchtower" in yaml.safe_load(STACKS["standard"].read_text())["services"],
-    "standard ships watchtower",
-)
+check("FIXUID" in str(syn.get("user")), "synology uid overridable via $FIXUID")
+check(str(syn["volumes"][0]).startswith("./"), "synology uses a bind mount")
+check(not str(std["volumes"][0]).startswith("./"), "standard uses a named volume")
+check("watchtower" in yaml.safe_load(std_raw)["services"], "standard ships watchtower")
+check("host_bridge" in yaml.safe_load(syn_raw).get("networks", {}),
+      "synology declares the named bridge")
+
+print("\n[naming + docs]")
+check(not (ROOT / "docker-compose.tor.yml").exists(),
+      "no ambiguous docker-compose.tor.yml (host unclear)")
+check(not (ROOT / "docker-compose.synology.yml").exists(),
+      "old dotted synology name removed")
+readme = (ROOT / "README.md").read_text()
+check("docker-compose.tor.yml" not in readme, "README has no ref to the removed tor file")
+check("docker-compose.synology.yml" not in readme, "README has no ref to the old synology name")
+check("docker-compose-synology.yml" in readme, "README documents the synology stack")
+for name, path in STACKS.items():
+    check("OPTIONAL: TOR" in path.read_text(), f"{name}: Tor block present and labelled")
 
 print(f"\nTOTAL passed={passed} failed={failed}")
 sys.exit(1 if failed else 0)

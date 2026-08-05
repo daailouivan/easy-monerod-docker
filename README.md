@@ -102,6 +102,8 @@ git clone https://github.com/daailouivan/easy-monerod-docker
 cd easy-monerod-docker
 ```
 
+Two files, one per host. Tor is an option inside each — not a separate file.
+
 **Standard Docker host** — named volume, Watchtower included:
 
 ```bash
@@ -113,25 +115,16 @@ docker compose up -d
 ```bash
 mkdir -p bitmonero
 chown -R 1026:100 bitmonero          # match your DSM user; check with: id <user>
-docker compose -f docker-compose.synology.yml up -d
+docker compose -f docker-compose-synology.yml up -d
 ```
 
-**Tor** — onion RPC, Tor transaction broadcast, inbound onion peers:
-
-```bash
-docker compose -f docker-compose.tor.yml up -d tor
-sleep 20 && ./scripts/tor-address.sh
-docker compose -f docker-compose.tor.yml up -d
-```
-
-| | `docker-compose.yml` | `docker-compose.synology.yml` | `docker-compose.tor.yml` |
-|---|---|---|---|
-| Storage | named volume `bitmonero` | bind mount `./bitmonero` | named volume |
-| User | fixuid adopts the volume's owner | explicit `${FIXUID:-1026}:${FIXGID:-100}` | fixuid |
-| Network | default bridge | named `host_bridge` | default bridge |
-| RPC | published | published | loopback only, reached via onion |
-| Watchtower | on | commented out | on |
-| Tor | — | commented-out example | full stack |
+| | `docker-compose.yml` | `docker-compose-synology.yml` |
+|---|---|---|
+| Storage | named volume `bitmonero` | bind mount `./bitmonero` |
+| User | fixuid adopts the volume's owner | explicit `${FIXUID:-1026}:${FIXGID:-100}` |
+| Network | default bridge | named `host_bridge` |
+| Watchtower | on | commented out |
+| Tor | optional, `#T` lines | optional, `#T` lines |
 
 The Synology variant uses a bind mount so the blockchain sits in a folder you
 can browse and back up from DSM, which in turn needs an explicit `user:` since
@@ -144,9 +137,24 @@ Override the image on either stack without editing the file:
 MONEROD_IMAGE=ghcr.io/daailouivan/easy-monerod:v0.18.5.1 docker compose up -d
 ```
 
-### Tor
+### Tor (optional, in either file)
 
-`docker-compose.tor.yml` implements all three capabilities described in
+Every line you need to uncomment is tagged `#T`, so:
+
+```bash
+grep -n '#T' docker-compose.yml     # exactly what to change, nothing else
+```
+
+Uncomment those, comment out the plain `- "18089:18089"` port they replace,
+then:
+
+```bash
+docker compose up -d tor
+sleep 20 && ./scripts/tor-address.sh
+docker compose up -d
+```
+
+This implements all three capabilities described in
 [`docs/ANONYMITY_NETWORKS.md`](https://github.com/monero-project/monero/blob/master/docs/ANONYMITY_NETWORKS.md):
 
 | Capability | Mechanism |
@@ -167,18 +175,12 @@ container does **not** give you:
 syncing over hidden services — it relies on IPv4 to make Sybil attacks harder.
 Tor anonymises *transaction origin*, not the fact that you run a node.
 
-Get your addresses:
-
-```bash
-./scripts/tor-address.sh
-```
-
 To advertise your onion to peers, put the P2P address in `.env` beside the
 compose file and re-create monerod:
 
 ```bash
 echo "ANONYMOUS_INBOUND=<p2p-onion>.onion:18084,127.0.0.1:18084,25" > .env
-docker compose -f docker-compose.tor.yml up -d
+docker compose up -d
 ```
 
 Optional — without it you still get the RPC onion and Tor tx broadcast, you
