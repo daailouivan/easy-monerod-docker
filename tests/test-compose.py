@@ -5,7 +5,10 @@ Guards the standard and Synology variants: they must stay parseable, point at
 the same GHCR image, keep the ports and data path the image expects, and pass
 only flags monerod actually accepts.
 """
+import os
 import pathlib
+import shutil
+import subprocess
 import sys
 
 import yaml
@@ -71,6 +74,39 @@ for name, path in STACKS.items():
         "RPC port restated (custom command replaces the image CMD)",
     )
     print()
+
+# Compose's own schema validator, when available. `config` needs no daemon.
+# The plugin is sometimes installed but not linked into the docker CLI, so
+# fall back to invoking the binary directly.
+def compose_cmd():
+    if shutil.which("docker"):
+        try:
+            subprocess.run(["docker", "compose", "version"], capture_output=True, check=True)
+            return ["docker", "compose"]
+        except (subprocess.CalledProcessError, OSError):
+            pass
+    for p in (
+        "/opt/homebrew/lib/docker/cli-plugins/docker-compose",
+        "/usr/local/lib/docker/cli-plugins/docker-compose",
+        os.path.expanduser("~/.docker/cli-plugins/docker-compose"),
+    ):
+        if os.access(p, os.X_OK):
+            return [p]
+    return shutil.which("docker-compose") and [shutil.which("docker-compose")]
+
+
+print("[compose schema]")
+cc = compose_cmd()
+if cc:
+    for name, path in STACKS.items():
+        r = subprocess.run(
+            cc + ["-f", str(path), "config", "--quiet"],
+            capture_output=True, text=True,
+        )
+        check(r.returncode == 0, f"{name}: docker compose config{'' if r.returncode == 0 else ' -> ' + r.stderr.strip()[:90]}")
+else:
+    print("  SKIP compose CLI not found on this host")
+print()
 
 print("[cross-stack]")
 std = yaml.safe_load(STACKS["standard"].read_text())["services"]["monerod"]
