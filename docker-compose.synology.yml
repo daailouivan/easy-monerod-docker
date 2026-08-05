@@ -1,0 +1,81 @@
+# Synology NAS variant.
+#
+# Differences from the standard docker-compose.yml:
+#   - bind mount (./bitmonero) instead of a named volume, so the blockchain
+#     lives in a Shared Folder you can browse, snapshot and back up via DSM
+#   - explicit user: DSM accounts start at uid 1026 and the 'users' group is
+#     gid 100; set these to match the owner of ./bitmonero
+#   - a named bridge network, since DSM's default bridge is often already in use
+#   - hostname pinned so peers and logs show a stable name
+#
+# Setup:
+#   mkdir -p bitmonero
+#   chown -R 1026:100 bitmonero        # must match FIXUID/FIXGID below
+#   docker compose -f docker-compose.synology.yml up -d
+#
+# Find your uid/gid over SSH with:  id your-dsm-username
+
+services:
+  monerod:
+    image: ${MONEROD_IMAGE:-ghcr.io/daailouivan/easy-monerod:latest}
+    container_name: monerod
+    hostname: monerod
+    restart: unless-stopped
+    # Run as the DSM user that owns ./bitmonero. Override per-host:
+    #   FIXUID=1027 FIXGID=100 docker compose -f docker-compose.synology.yml up -d
+    user: ${FIXUID:-1026}:${FIXGID:-100}
+    volumes:
+      - ./bitmonero:/home/monero/.bitmonero
+    ports:
+      - "18080:18080"   # p2p
+      - "18089:18089"   # restricted RPC
+    command:
+      - --rpc-restricted-bind-ip=0.0.0.0
+      - --rpc-restricted-bind-port=18089
+      - --no-igd
+      - --enable-dns-blocklist
+      # Static ban list shipped in the image (PGP-verified at build time).
+      # Optional: --enable-dns-blocklist above already bans dynamically.
+      - --ban-list=/home/monero/ban_list.txt
+      # - --no-zmq
+      # - --public-node
+      # - --prune-blockchain
+    networks:
+      - host_bridge
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+
+  # Optional: expose the restricted RPC as a v3 onion service.
+  # Read the address once it is up:
+  #   docker compose -f docker-compose.synology.yml exec tor \
+  #     cat /var/lib/tor/MONEROD_TOR_SERVICE/hostname
+  # tor:
+  #   image: ghcr.io/hundehausen/tor-hidden-service:latest
+  #   container_name: tor
+  #   restart: unless-stopped
+  #   depends_on:
+  #     - monerod
+  #   environment:
+  #     # Format: HS_[NAME]=[HOST]:[PORT]:[VIRTUAL_PORT]
+  #     - HS_MONEROD_TOR_SERVICE_HOSTS=monerod:18089:18089
+  #   volumes:
+  #     - ./tor-keys:/var/lib/tor
+  #   networks:
+  #     - host_bridge
+
+  # Optional: auto-update monerod when a new image is published.
+  # watchtower:
+  #   image: containrrr/watchtower:latest
+  #   container_name: monerod-watchtower
+  #   restart: unless-stopped
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock
+  #   environment:
+  #     WATCHTOWER_LABEL_ENABLE: "true"
+  #     WATCHTOWER_CLEANUP: "true"
+  #     WATCHTOWER_POLL_INTERVAL: "21600"
+
+networks:
+  host_bridge:
+    name: host_bridge
+    driver: bridge

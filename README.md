@@ -102,48 +102,41 @@ git clone https://github.com/daailouivan/easy-monerod-docker
 cd easy-monerod-docker
 ```
 
-One `docker-compose.yml` covers every setup — the variants ship commented out,
-each labelled with a marker you can search for.
-
-**Standard Docker host** — named volume, Watchtower included. No edits needed:
+**Standard Docker host** — named volume, Watchtower included:
 
 ```bash
 docker compose up -d
 ```
 
-**Synology NAS** — uncomment the `(A) SYNOLOGY` lines: `user:`, the
-`./bitmonero` bind mount (and comment the named volume above it), and the
-`networks:` / `host_bridge` blocks.
+**Synology NAS** — bind mount into a Shared Folder, explicit DSM uid/gid:
 
 ```bash
 mkdir -p bitmonero
 chown -R 1026:100 bitmonero          # match your DSM user; check with: id <user>
-docker compose up -d
+docker compose -f docker-compose.synology.yml up -d
 ```
 
-DSM accounts start at uid 1026 (group `users` = gid 100), so the container
-needs an explicit `user:`; the bind mount puts the blockchain in a Shared
-Folder you can browse and back up from DSM.
-
-**Tor** — uncomment the `(B) TOR` lines: the `tor:` service, `--tx-proxy`,
-`--anonymous-inbound`, `depends_on`, the loopback RPC port (comment the plain
-`18089:18089` above it), and the `tor-keys` volume.
+**Tor** — onion RPC, Tor transaction broadcast, inbound onion peers:
 
 ```bash
-docker compose up -d tor
+docker compose -f docker-compose.tor.yml up -d tor
 sleep 20 && ./scripts/tor-address.sh
-docker compose up -d
+docker compose -f docker-compose.tor.yml up -d
 ```
 
-| Marker | Enables |
-|---|---|
-| *(default)* | named volume, RPC on the LAN, Watchtower |
-| `(A) SYNOLOGY` | bind mount, explicit uid:gid, named bridge |
-| `(B) TOR` | onion RPC, Tor tx broadcast, inbound onion peers |
-| `(C) COMMON OPTIONS` | `--public-node`, `--prune-blockchain` |
+| | `docker-compose.yml` | `docker-compose.synology.yml` | `docker-compose.tor.yml` |
+|---|---|---|---|
+| Storage | named volume `bitmonero` | bind mount `./bitmonero` | named volume |
+| User | fixuid adopts the volume's owner | explicit `${FIXUID:-1026}:${FIXGID:-100}` | fixuid |
+| Network | default bridge | named `host_bridge` | default bridge |
+| RPC | published | published | loopback only, reached via onion |
+| Watchtower | on | commented out | on |
+| Tor | — | commented-out example | full stack |
 
-A and B combine: apply both sets of lines, and also uncomment the tor
-service's own `networks:` block.
+The Synology variant uses a bind mount so the blockchain sits in a folder you
+can browse and back up from DSM, which in turn needs an explicit `user:` since
+DSM accounts start at uid 1026 (group `users` = gid 100). Set `FIXUID`/`FIXGID`
+to whatever owns `./bitmonero`.
 
 Override the image on either stack without editing the file:
 
@@ -153,7 +146,7 @@ MONEROD_IMAGE=ghcr.io/daailouivan/easy-monerod:v0.18.5.1 docker compose up -d
 
 ### Tor
 
-The `(B) TOR` block implements all three capabilities described in
+`docker-compose.tor.yml` implements all three capabilities described in
 [`docs/ANONYMITY_NETWORKS.md`](https://github.com/monero-project/monero/blob/master/docs/ANONYMITY_NETWORKS.md):
 
 | Capability | Mechanism |
@@ -185,7 +178,7 @@ compose file and re-create monerod:
 
 ```bash
 echo "ANONYMOUS_INBOUND=<p2p-onion>.onion:18084,127.0.0.1:18084,25" > .env
-docker compose up -d
+docker compose -f docker-compose.tor.yml up -d
 ```
 
 Optional — without it you still get the RPC onion and Tor tx broadcast, you
