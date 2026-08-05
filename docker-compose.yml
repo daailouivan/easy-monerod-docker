@@ -1,6 +1,6 @@
 services:
   monerod:
-    image: ${MONEROD_IMAGE:-daailouivan/easy-monerod:latest}
+    image: ${MONEROD_IMAGE:-ghcr.io/daailouivan/easy-monerod:latest}
     # build: .    # uncomment to build locally instead of pulling
     container_name: monerod
     restart: unless-stopped

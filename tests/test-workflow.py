@@ -83,12 +83,28 @@ for tag in ("latest", "alpine", "${{ needs.update.outputs.version }}"):
 check(any("Verify" in s for s in msteps), "verifies the pushed manifest")
 check("imagetools inspect" in mtext, "inspects the manifest after push")
 check(mtext.count("linux/amd64") and mtext.count("linux/arm64"), "asserts both arches post-push")
-check(any("README" in s for s in msteps), "syncs the Docker Hub description")
+check(any("public" in s.lower() for s in msteps), "makes the GHCR package public")
+check(any("Summary" in s for s in msteps), "writes a run summary with the pull command")
 
-print("[safety]")
-check("DOCKERHUB_TOKEN" in raw and "DOCKERHUB_USERNAME" in raw, "uses secrets, no inline creds")
+print("[registry: GHCR, no stored credential]")
+check("ghcr.io" in d["env"]["IMAGE"], f'publishes to GHCR ({d["env"]["IMAGE"]})')
+check(d["permissions"].get("packages") == "write", "packages:write granted")
+check("DOCKERHUB" not in raw, "no Docker Hub secret referenced anywhere")
 check("dckr_pat_" not in raw, "no hardcoded token")
-check("daailouivan" in raw, "author/namespace set")
+check(
+    raw.count("secrets.GITHUB_TOKEN") >= 2,
+    "auths with the per-run GITHUB_TOKEN (build + merge)",
+)
+check(
+    all(
+        "ghcr.io" in s.get("with", {}).get("registry", "")
+        for j in ("build", "merge")
+        for s in jobs[j]["steps"]
+        if s.get("uses", "").startswith("docker/login-action")
+    ),
+    "every login targets ghcr.io",
+)
+check("github.repository_owner" in d["env"]["IMAGE"], "namespace derived from the repo, not hardcoded")
 
 print(f"\nTOTAL passed={passed} failed={failed}")
 sys.exit(1 if failed else 0)

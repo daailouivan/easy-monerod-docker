@@ -17,7 +17,7 @@ Current pin: **v0.18.5.1** (`4f92268d`)
 docker run -d --restart unless-stopped --name monerod \
   -v bitmonero:/home/monero/.bitmonero \
   -p 18080:18080 -p 18089:18089 \
-  daailouivan/easy-monerod:latest
+  ghcr.io/daailouivan/easy-monerod:latest
 ```
 
 The baked-in `CMD` already sets sane defaults:
@@ -34,7 +34,7 @@ Anything you append replaces them, so pass the full set when overriding.
 ```bash
 docker run -d --restart unless-stopped --name monerod \
   -v bitmonero:/home/monero/.bitmonero -p 18080:18080 -p 18089:18089 \
-  daailouivan/easy-monerod:latest \
+  ghcr.io/daailouivan/easy-monerod:latest \
   --rpc-restricted-bind-ip=0.0.0.0 --rpc-restricted-bind-port=18089 \
   --public-node --no-igd --no-zmq --enable-dns-blocklist \
   --ban-list=/home/monero/ban_list.txt
@@ -88,8 +88,9 @@ test "$(git rev-parse HEAD)" = "${MONERO_COMMIT_HASH}" || exit 1
 so a bump that resolves to an unexpected commit fails the build rather than
 shipping it.
 
-**Required repo secrets:** `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`.
-Optional repo variable: `DOCKERHUB_USERNAME` (image namespace, defaults to `daailouivan`).
+**No secrets required.** Publishing uses GHCR with the per-run `GITHUB_TOKEN`,
+which GitHub mints for each run, scopes to this repository, and expires when the
+run ends — so no long-lived registry credential is stored in this repo.
 
 ### 2. Container side (runtime) — Watchtower
 

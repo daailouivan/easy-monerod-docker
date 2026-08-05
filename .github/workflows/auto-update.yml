@@ -8,6 +8,10 @@ name: auto-update
 #
 # Native runners avoid QEMU emulation for arm64, which is ~5-10x slower than
 # native and previously dominated total build time.
+#
+# Publishes to GHCR using the per-run GITHUB_TOKEN: it is minted for this run,
+# scoped to this repository, and expires when the run ends. No long-lived
+# registry credential is stored in this repo.
 on:
   schedule:
     - cron: "0 6 * * *"      # daily 06:00 UTC
@@ -20,9 +24,10 @@ on:
 
 permissions:
   contents: write
+  packages: write          # push to GHCR as the workflow's own identity
 
 env:
-  IMAGE: ${{ vars.DOCKERHUB_USERNAME || 'daailouivan' }}/easy-monerod
+  IMAGE: ghcr.io/${{ github.repository_owner }}/easy-monerod
 
 jobs:
   update:
@@ -87,18 +92,12 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      - name: Verify Docker Hub credentials are configured
-        run: |
-          if [ -z "${{ secrets.DOCKERHUB_USERNAME }}" ] || [ -z "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
-            echo "::error::Set the DOCKERHUB_USERNAME and DOCKERHUB_TOKEN repo secrets before pushing." >&2
-            exit 1
-          fi
-
-      - name: Log in to Docker Hub
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push by digest (${{ matrix.arch }}, native)
         id: build
@@ -143,11 +142,12 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      - name: Log in to Docker Hub
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create and push the multi-arch manifest
         working-directory: /tmp/digests
@@ -170,12 +170,26 @@ jobs:
           grep -q "linux/arm64" /tmp/manifest.txt || { echo "::error::arm64 missing" >&2; exit 1; }
           echo "Multi-arch manifest verified: amd64 + arm64"
 
-      - name: Sync README to the Docker Hub repo description
-        uses: peter-evans/dockerhub-description@v4
+      # GHCR packages default to private on first publish. Flip to public so
+      # the image is pullable anonymously, matching the repo's visibility.
+      - name: Make the GHCR package public
         continue-on-error: true
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-          repository: ${{ env.IMAGE }}
-          short-description: "Static monerod that auto-tracks the newest monero-project/monero release"
-          readme-filepath: ./README.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api -X PATCH "/user/packages/container/easy-monerod" \
+            -f visibility=public 2>/dev/null \
+            && echo "package set public" \
+            || echo "note: could not set visibility automatically; do it once in the package settings UI"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Published \`${{ needs.update.outputs.version }}\`"
+            echo
+            echo '```bash'
+            echo "docker pull ${IMAGE}:latest"
+            echo '```'
+            echo
+            echo "Architectures: linux/amd64, linux/arm64"
+          } >> "$GITHUB_STEP_SUMMARY"
