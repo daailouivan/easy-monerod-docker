@@ -7,11 +7,30 @@ using the same build logic, pinned to the latest tag from
 [monero-project/monero](https://github.com/monero-project/monero/tags), plus an
 automatic update pipeline the original doesn't ship.
 
-Current pin: **v0.18.5.1** (`4f92268d`)
+```
+ghcr.io/daailouivan/easy-monerod:latest
+```
+
+| | |
+|---|---|
+| **Image** | `ghcr.io/daailouivan/easy-monerod` |
+| **Monero** | v0.18.5.1 (`4f92268d`) |
+| **Platforms** | `linux/amd64`, `linux/arm64` |
+| **Size** | ~17 MB |
+
+Published to the GitHub Container Registry. Public — no login needed to pull.
 
 ---
 
-## Quick start
+## Install
+
+### 1. Pull
+
+```bash
+docker pull ghcr.io/daailouivan/easy-monerod:latest
+```
+
+### 2. Run
 
 ```bash
 docker run -d --restart unless-stopped --name monerod \
@@ -19,6 +38,36 @@ docker run -d --restart unless-stopped --name monerod \
   -p 18080:18080 -p 18089:18089 \
   ghcr.io/daailouivan/easy-monerod:latest
 ```
+
+### 3. Verify it's syncing
+
+```bash
+docker logs -f monerod                      # follow startup
+docker inspect --format='{{.State.Health.Status}}' monerod   # -> healthy
+curl -s http://127.0.0.1:18089/get_height   # -> {"height":...,"status":"OK"}
+```
+
+The container reports `starting` until the first healthcheck passes, then
+`healthy`. Initial sync takes hours to days; `--prune-blockchain` cuts the
+storage roughly in half.
+
+### Migrating from `sethsimmons/simple-monerod`
+
+Drop-in — same `monero` user, same `/home/monero/.bitmonero` data path, same
+`fixuid` UID remapping. Point the new image at your existing volume; **no
+resync**:
+
+```bash
+docker stop monerod && docker rm monerod
+# then run the command above with your existing -v volume
+```
+
+Keep whatever flags you were already passing; the defaults below are identical
+to upstream's apart from the added `--ban-list`.
+
+---
+
+## Usage
 
 The baked-in `CMD` already sets sane defaults:
 
@@ -44,23 +93,65 @@ docker run -d --restart unless-stopped --name monerod \
 
 Append `--prune-blockchain` to either form above.
 
-### Compose (recommended — includes runtime auto-update)
+### Compose
+
+Two stacks are provided — pick the one that matches your host.
+
+```bash
+git clone https://github.com/daailouivan/easy-monerod-docker
+cd easy-monerod-docker
+```
+
+**Standard Docker host** — named volume, Watchtower included:
 
 ```bash
 docker compose up -d
+```
+
+**Synology NAS** — bind mount into a Shared Folder, explicit DSM uid/gid:
+
+```bash
+mkdir -p bitmonero
+chown -R 1026:100 bitmonero          # match your DSM user; check with: id <user>
+docker compose -f docker-compose.synology.yml up -d
+```
+
+| | `docker-compose.yml` | `docker-compose.synology.yml` |
+|---|---|---|
+| Storage | named volume `bitmonero` | bind mount `./bitmonero` |
+| User | fixuid adopts the volume's owner | explicit `${FIXUID:-1026}:${FIXGID:-100}` |
+| Network | default bridge | named `host_bridge` |
+| Watchtower | on | commented out |
+| Tor hidden service | — | commented-out example |
+
+The Synology variant uses a bind mount so the blockchain sits in a folder you
+can browse and back up from DSM, which in turn needs an explicit `user:` since
+DSM accounts start at uid 1026 (group `users` = gid 100). Set `FIXUID`/`FIXGID`
+to whatever owns `./bitmonero`.
+
+Override the image on either stack without editing the file:
+
+```bash
+MONEROD_IMAGE=ghcr.io/daailouivan/easy-monerod:v0.18.5.1 docker compose up -d
 ```
 
 ---
 
 ## Tags
 
-| Tag         | Contents                                                    |
-|-------------|-------------------------------------------------------------|
+All tags live under `ghcr.io/daailouivan/easy-monerod`.
+
+| Tag         | Contents                                                     |
+|-------------|--------------------------------------------------------------|
 | `latest`    | Newest tagged Monero release, Alpine base                    |
 | `alpine`    | Same as `latest`                                             |
-| `vX.Y.Z.W`  | That specific Monero release, Alpine base                    |
+| `vX.Y.Z.W`  | That specific Monero release (e.g. `v0.18.5.1`), Alpine base |
 
-Multi-arch: `linux/amd64` and `linux/arm64`.
+Pin to `vX.Y.Z.W` if you want to control exactly when your node upgrades;
+use `latest` if you want it to follow releases.
+
+Every tag is a multi-arch manifest covering `linux/amd64` and `linux/arm64`,
+so the same reference works on x86 servers and ARM boards alike.
 
 ---
 
