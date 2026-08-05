@@ -1,0 +1,39 @@
+services:
+  monerod:
+    image: ${MONEROD_IMAGE:-daailouivan/easy-monerod:latest}
+    # build: .    # uncomment to build locally instead of pulling
+    container_name: monerod
+    restart: unless-stopped
+    volumes:
+      - bitmonero:/home/monero/.bitmonero
+    ports:
+      - "18080:18080"   # p2p
+      - "18089:18089"   # restricted RPC
+    command:
+      - --rpc-restricted-bind-ip=0.0.0.0
+      - --rpc-restricted-bind-port=18089
+      - --no-igd
+      - --no-zmq
+      - --enable-dns-blocklist
+      - --ban-list=/home/monero/ban_list.txt
+      # - --public-node
+      # - --prune-blockchain
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+
+  # Runtime half of the auto-update story: polls the registry and recreates
+  # monerod whenever CI has published a new image for a new monero release.
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: monerod-watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      WATCHTOWER_LABEL_ENABLE: "true"    # only containers opted in above
+      WATCHTOWER_CLEANUP: "true"         # prune the superseded image
+      WATCHTOWER_POLL_INTERVAL: "21600"  # every 6h
+      WATCHTOWER_INCLUDE_RESTARTING: "true"
+
+volumes:
+  bitmonero:
