@@ -45,17 +45,21 @@ services:
     labels:
       com.centurylinklabs.watchtower.enable: "true"
 
-  # Optional: expose the restricted RPC port as a Tor hidden service.
+  # Optional: expose the restricted RPC as a v3 onion service.
+  # Read the address once it is up:
+  #   docker compose -f docker-compose.synology.yml exec tor \
+  #     cat /var/lib/tor/MONEROD_TOR_SERVICE/hostname
   # tor:
-  #   image: goldy/tor-hidden-service:latest
+  #   image: ghcr.io/hundehausen/tor-hidden-service:latest
+  #   container_name: tor
   #   restart: unless-stopped
-  #   links:
+  #   depends_on:
   #     - monerod
   #   environment:
-  #     MONEROD_TOR_SERVICE_HOSTS: 18089:monerod:18089
-  #     MONEROD_TOR_SERVICE_VERSION: '3'
+  #     # Format: HS_[NAME]=[HOST]:[PORT]:[VIRTUAL_PORT]
+  #     - HS_MONEROD_TOR_SERVICE_HOSTS=monerod:18089:18089
   #   volumes:
-  #     - ./tor-keys:/var/lib/tor/hidden_service/
+  #     - ./tor-keys:/var/lib/tor
   #   networks:
   #     - host_bridge
 

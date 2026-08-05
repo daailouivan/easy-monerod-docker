@@ -116,13 +116,22 @@ chown -R 1026:100 bitmonero          # match your DSM user; check with: id <user
 docker compose -f docker-compose.synology.yml up -d
 ```
 
-| | `docker-compose.yml` | `docker-compose.synology.yml` |
-|---|---|---|
-| Storage | named volume `bitmonero` | bind mount `./bitmonero` |
-| User | fixuid adopts the volume's owner | explicit `${FIXUID:-1026}:${FIXGID:-100}` |
-| Network | default bridge | named `host_bridge` |
-| Watchtower | on | commented out |
-| Tor hidden service | — | commented-out example |
+**Tor** — onion RPC, Tor transaction broadcast, inbound onion peers:
+
+```bash
+docker compose -f docker-compose.tor.yml up -d tor
+sleep 20 && ./scripts/tor-address.sh
+docker compose -f docker-compose.tor.yml up -d
+```
+
+| | `docker-compose.yml` | `docker-compose.synology.yml` | `docker-compose.tor.yml` |
+|---|---|---|---|
+| Storage | named volume `bitmonero` | bind mount `./bitmonero` | named volume |
+| User | fixuid adopts the volume's owner | explicit `${FIXUID:-1026}:${FIXGID:-100}` | fixuid |
+| Network | default bridge | named `host_bridge` | default bridge |
+| RPC | published | published | loopback only, reached via onion |
+| Watchtower | on | commented out | on |
+| Tor | — | commented-out example | full stack |
 
 The Synology variant uses a bind mount so the blockchain sits in a folder you
 can browse and back up from DSM, which in turn needs an explicit `user:` since
@@ -134,6 +143,47 @@ Override the image on either stack without editing the file:
 ```bash
 MONEROD_IMAGE=ghcr.io/daailouivan/easy-monerod:v0.18.5.1 docker compose up -d
 ```
+
+### Tor
+
+`docker-compose.tor.yml` implements all three capabilities described in
+[`docs/ANONYMITY_NETWORKS.md`](https://github.com/monero-project/monero/blob/master/docs/ANONYMITY_NETWORKS.md):
+
+| Capability | Mechanism |
+|---|---|
+| Wallets reach the node over Tor | RPC hidden service -> `<onion>:18089` |
+| Your transactions broadcast over Tor | `--tx-proxy=tor,tor:9050,10` |
+| Accept inbound onion peers | `--anonymous-inbound` on port **18084** |
+
+Two details the docs are explicit about, and that a bare hidden-service
+container does **not** give you:
+
+- **An onion address alone does not anonymise your transactions.** That needs
+  `--tx-proxy`, which routes your own broadcasts through the Tor SOCKS proxy.
+- **`--anonymous-inbound` must use a dedicated port** (18084 here), never the
+  clearnet p2p port 18080.
+
+**The blockchain still syncs over clearnet IPv4.** monerod does not support
+syncing over hidden services — it relies on IPv4 to make Sybil attacks harder.
+Tor anonymises *transaction origin*, not the fact that you run a node.
+
+Get your addresses:
+
+```bash
+./scripts/tor-address.sh
+```
+
+To advertise your onion to peers, put the P2P address in `.env` beside the
+compose file and re-create monerod:
+
+```bash
+echo "ANONYMOUS_INBOUND=<p2p-onion>.onion:18084,127.0.0.1:18084,25" > .env
+docker compose -f docker-compose.tor.yml up -d
+```
+
+Optional — without it you still get the RPC onion and Tor tx broadcast, you
+just do not accept inbound onion peers. The `tor-keys` volume holds your onion
+keys: back it up to keep the same address, and never share it.
 
 ---
 

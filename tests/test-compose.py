@@ -17,6 +17,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 STACKS = {
     "standard": ROOT / "docker-compose.yml",
     "synology": ROOT / "docker-compose.synology.yml",
+    "tor": ROOT / "docker-compose.tor.yml",
 }
 IMAGE = "ghcr.io/daailouivan/easy-monerod"
 DATA = "/home/monero/.bitmonero"
@@ -27,6 +28,9 @@ KNOWN = {
     "--no-zmq", "--enable-dns-blocklist", "--ban-list", "--public-node",
     "--prune-blockchain", "--rpc-bind-port", "--rpc-login", "--non-interactive",
     "--data-dir", "--log-level", "--out-peers", "--in-peers",
+    # Tor/I2P, per docs/ANONYMITY_NETWORKS.md
+    "--tx-proxy", "--anonymous-inbound", "--proxy", "--p2p-bind-ip",
+    "--add-exclusive-node", "--add-priority-node", "--add-peer",
 }
 
 passed = failed = 0
@@ -57,7 +61,12 @@ for name, path in STACKS.items():
 
     ports = [str(p).strip('"') for p in svc["ports"]]
     check(any(p.startswith("18080") for p in ports), "p2p 18080 published")
-    check(any(p.startswith("18089") for p in ports), "restricted RPC 18089 published")
+    # The tor stack deliberately binds RPC to loopback (reachable via the
+    # onion service, not the LAN), so accept either form.
+    check(
+        any(p.endswith("18089:18089") or p.startswith("18089") for p in ports),
+        "restricted RPC 18089 mapped",
+    )
 
     cmd = svc["command"]
     flags = {c.split("=")[0] for c in cmd}
@@ -106,6 +115,58 @@ if cc:
         check(r.returncode == 0, f"{name}: docker compose config{'' if r.returncode == 0 else ' -> ' + r.stderr.strip()[:90]}")
 else:
     print("  SKIP compose CLI not found on this host")
+print()
+
+print("[tor stack — per monero-project/monero docs/ANONYMITY_NETWORKS.md]")
+tor_doc = yaml.safe_load(STACKS["tor"].read_text())
+tsvc = tor_doc["services"]["tor"]
+tmon = tor_doc["services"]["monerod"]
+tcmd = tmon["command"]
+traw = STACKS["tor"].read_text()
+
+check("hundehausen/tor-hidden-service" in tsvc["image"], "maintained tor image")
+check("goldy/" not in traw, "not the stale goldy image (last built 2023)")
+
+hs = dict(e.split("=", 1) for e in tsvc["environment"] if e.startswith("HS_"))
+check(len(hs) == 2, f"two hidden services declared: {sorted(hs)}")
+rpc = [v for k, v in hs.items() if "RPC" in k]
+p2p = [v for k, v in hs.items() if "P2P" in k]
+check(bool(rpc) and rpc[0] == "monerod:18089:18089", "RPC onion -> monerod:18089")
+check(bool(p2p) and p2p[0] == "monerod:18084:18084", "P2P onion -> monerod:18084")
+
+# Official requirement: anonymous-inbound port must NOT be the clearnet p2p port.
+check(
+    bool(p2p) and not p2p[0].split(":")[1] == "18080",
+    "anonymous-inbound uses a dedicated port, not 18080 (docs requirement)",
+)
+
+# 2 of the 3 official capabilities are monerod flags, not container config.
+txp = [c for c in tcmd if c.startswith("--tx-proxy")]
+check(bool(txp), f"--tx-proxy set, so our own txs broadcast over Tor: {txp}")
+check(
+    bool(txp) and txp[0].split("=", 1)[1].startswith("tor,"),
+    "tx-proxy declares the tor network type",
+)
+check(
+    any(c.startswith("--anonymous-inbound") for c in tcmd),
+    "--anonymous-inbound present (accepts inbound onion peers)",
+)
+check("ANONYMOUS_INBOUND" in traw, "inbound onion address supplied via env, not hardcoded")
+
+check(
+    any("tor-keys" in v for v in tsvc["volumes"]),
+    "onion keys persisted (stable addresses across restarts)",
+)
+check("tor-keys" in tor_doc["volumes"], "tor-keys volume declared")
+check(
+    any(str(p).strip('"').startswith("127.0.0.1:18089") for p in tmon["ports"]),
+    "RPC on loopback only (reachable via onion, not the LAN)",
+)
+check(
+    any(str(p).strip('"').startswith("18080") for p in tmon["ports"]),
+    "clearnet p2p still published (monerod cannot sync over onion)",
+)
+check(tmon.get("depends_on") == ["tor"], "monerod waits for the tor proxy")
 print()
 
 print("[cross-stack]")
