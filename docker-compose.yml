@@ -1,28 +1,122 @@
+# easy-monerod-docker — single compose file, all variants included.
+#
+#   docker compose up -d
+#
+# Default: monerod + Watchtower, named volume, RPC published on the LAN.
+# Everything else is commented below — uncomment the block you need.
+#
+#   A) Synology / NAS ....... bind mount + explicit uid:gid + named bridge
+#   B) Tor .................. onion RPC, Tor tx broadcast, inbound onion peers
+#   C) Pruned / public node . single flags
+#
+# Override the image without editing this file:
+#   MONEROD_IMAGE=ghcr.io/daailouivan/easy-monerod:v0.18.5.1 docker compose up -d
+
 services:
   monerod:
     image: ${MONEROD_IMAGE:-ghcr.io/daailouivan/easy-monerod:latest}
     # build: .    # uncomment to build locally instead of pulling
     container_name: monerod
     restart: unless-stopped
+
+    # --- (A) SYNOLOGY / NAS -------------------------------------------------
+    # DSM accounts start at uid 1026 and the 'users' group is gid 100. Set
+    # these to whatever owns ./bitmonero, then use the bind mount below.
+    # Find yours over SSH with:  id <your-dsm-username>
+    #
+    # user: ${FIXUID:-1026}:${FIXGID:-100}
+    # hostname: monerod
+    # ------------------------------------------------------------------------
+
     volumes:
+      # Default: named volume, managed by Docker.
       - bitmonero:/home/monero/.bitmonero
+      #
+      # (A) Synology: bind mount instead, so the blockchain lives in a Shared
+      # Folder you can browse and back up from DSM. Comment out the line above.
+      #   mkdir -p bitmonero && chown -R 1026:100 bitmonero
+      # - ./bitmonero:/home/monero/.bitmonero
+
     ports:
-      - "18080:18080"   # p2p
+      - "18080:18080"   # p2p (clearnet sync)
       - "18089:18089"   # restricted RPC
+      #
+      # (B) Tor: keep RPC off the LAN — the tor container reaches it over the
+      # compose network. Comment out the 18089 line above and use this.
+      # - "127.0.0.1:18089:18089"
+
     command:
       - --rpc-restricted-bind-ip=0.0.0.0
       - --rpc-restricted-bind-port=18089
       - --no-igd
       - --no-zmq
       - --enable-dns-blocklist
+      # Static ban list baked into the image (PGP-verified at build time).
+      # --enable-dns-blocklist above already bans dynamically; this adds a
+      # curated static list on top. Optional.
       - --ban-list=/home/monero/ban_list.txt
-      # - --public-node
-      # - --prune-blockchain
+      #
+      # --- (C) COMMON OPTIONS ---
+      # - --public-node          # advertise the restricted RPC to the network
+      # - --prune-blockchain     # roughly halves disk usage
+      #
+      # --- (B) TOR ---
+      # Per monero-project/monero docs/ANONYMITY_NETWORKS.md. An onion address
+      # ALONE does not anonymise your transactions — --tx-proxy is what routes
+      # your own broadcasts over Tor.
+      #
+      # - --tx-proxy=tor,tor:9050,10
+      #
+      # Inbound onion peers. The port MUST be dedicated (18084), never the
+      # clearnet p2p port 18080. Supply the address via .env once Tor has
+      # generated it — see scripts/tor-address.sh.
+      # - --anonymous-inbound=${ANONYMOUS_INBOUND:-}
+
     labels:
       com.centurylinklabs.watchtower.enable: "true"
 
+    # (A) Synology: DSM's default bridge is often already in use.
+    # networks:
+    #   - host_bridge
+    #
+    # (B) Tor: start the proxy first.
+    # depends_on:
+    #   - tor
+
+  # --- (B) TOR ------------------------------------------------------------
+  # Publishes two hidden services: one for RPC (wallets), one for inbound P2P.
+  #
+  # First run — the onion addresses do not exist until Tor has started once:
+  #   1. docker compose up -d tor
+  #   2. sleep 20 && ./scripts/tor-address.sh
+  #   3. echo "ANONYMOUS_INBOUND=<p2p-onion>:18084,127.0.0.1:18084,25" > .env
+  #   4. docker compose up -d
+  #
+  # Step 3 is optional: without it you still get the RPC onion and Tor tx
+  # broadcast, you just do not accept inbound onion peers.
+  #
+  # NOTE: the blockchain still syncs over clearnet IPv4 — monerod does not
+  # support syncing over hidden services.
+  #
+  # tor:
+  #   image: ghcr.io/hundehausen/tor-hidden-service:latest
+  #   container_name: tor
+  #   restart: unless-stopped
+  #   volumes:
+  #     - tor-keys:/var/lib/tor
+  #   environment:
+  #     # Format: HS_[NAME]=[HOST]:[PORT]:[VIRTUAL_PORT]
+  #     - HS_MONEROD_RPC=monerod:18089:18089
+  #     - HS_MONEROD_P2P=monerod:18084:18084
+  #
+  #   # (A)+(B) together: the tor service needs the Synology bridge too.
+  #   # networks:
+  #   #   - host_bridge
+  # ------------------------------------------------------------------------
+
   # Runtime half of the auto-update story: polls the registry and recreates
-  # monerod whenever CI has published a new image for a new monero release.
+  # monerod whenever CI publishes a new image for a new Monero release.
+  # Comment this service out if you prefer to upgrade by hand.
   watchtower:
     image: containrrr/watchtower:latest
     container_name: monerod-watchtower
@@ -37,3 +131,12 @@ services:
 
 volumes:
   bitmonero:
+  # (B) Tor: holds your onion keys. Back it up to keep the same address;
+  # never share it.
+  # tor-keys:
+
+# (A) Synology
+# networks:
+#   host_bridge:
+#     name: host_bridge
+#     driver: bridge
